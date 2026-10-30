@@ -1873,7 +1873,11 @@ var HelperProcess = class {
 */
 const PKG_VERSION = "0.1.1";
 const name = "@yunxii/dsh-client-ui-skin-maid-whale-webui";
-const inject = ["sessions", "settings"];
+const inject = [
+	"sessions",
+	"settings",
+	"configEditor"
+];
 const CONFIG_ENDPOINT = "/plugins/maid-whale-webui/config";
 const Config = Schema.object({
 	enabled: Schema.boolean().default(true).description("启用鲸鱼桌宠"),
@@ -1923,10 +1927,27 @@ function publicConfig(config = {}) {
 		includeSubagents: config.includeSubagents ?? defaults.includeSubagents
 	};
 }
-function localSettingsScope(value) {
+function localSettingsScope(value, ctx) {
+	let listener;
 	return {
 		get: () => value,
-		watch: () => () => {}
+		watch: (nextListener) => {
+			listener = nextListener;
+			return () => {
+				listener = void 0;
+			};
+		},
+		update: async (patch) => {
+			const entryId = ctx.fiber?.entry?.options.id;
+			const entry = ctx.configEditor?.entries().find((entry) => entry.options.id === entryId);
+			if (!entry || !ctx.configEditor) throw new Error("companion settings require a DSH plugin entry");
+			await ctx.configEditor.edit(entry, (raw) => ({
+				...raw,
+				...patch
+			}));
+			Object.assign(value, patch);
+			listener?.(value);
+		}
 	};
 }
 function jsonResponse(res, status, body) {
@@ -2000,7 +2021,7 @@ function mount(ctx, config = {}, eventCtx = ctx) {
 	const settings = ctx.settings?.register?.("maid-whale-webui", Config, {
 		base,
 		applies: "live"
-	}) ?? localSettingsScope(base);
+	}) ?? localSettingsScope(base, eventCtx);
 	let bridge;
 	let reducer;
 	let restartTimer;
@@ -2125,7 +2146,7 @@ function mount(ctx, config = {}, eventCtx = ctx) {
 function apply(ctx, config = {}) {
 	const context = ctx;
 	if (typeof context.inject === "function") {
-		context.inject(["settings"], (settingsCtx) => mount(settingsCtx, config, context));
+		context.inject(["settings", "configEditor"], (settingsCtx) => mount(settingsCtx, config, context));
 		return;
 	}
 	mount(context, config);

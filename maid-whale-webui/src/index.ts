@@ -17,7 +17,7 @@ export const name = '@yunxii/dsh-client-ui-skin-maid-whale-webui'
 // service (used to read live config). Keep the declared inject in sync with
 // those real hard dependencies instead of listing a service that is never
 // consumed directly.
-export const inject = ['sessions', 'settings']
+export const inject = ['sessions', 'settings', 'configEditor']
 export const CONFIG_ENDPOINT = '/plugins/maid-whale-webui/config'
 export const Config = Schema.object({
   enabled: Schema.boolean().default(true).description('启用鲸鱼桌宠'),
@@ -90,6 +90,14 @@ interface WebServerService {
 }
 
 interface MinimalContext {
+  fiber?: { entry?: { options: { id: string } } }
+  configEditor?: {
+    entries: () => Array<{ options: { id: string } }>
+    edit: (
+      entry: { options: { id: string } },
+      change: (raw: Record<string, unknown>) => Record<string, unknown>,
+    ) => Promise<void>
+  }
   logger?: {
     info?: (...args: unknown[]) => void
     warn?: (...args: unknown[]) => void
@@ -114,10 +122,26 @@ function publicConfig(config: CompanionConfig = {}): Record<string, unknown> {
   }
 }
 
-function localSettingsScope(value: CompanionConfig): SettingsScope {
+function localSettingsScope(value: CompanionConfig, ctx: MinimalContext): SettingsScope {
+  let listener: ((next: CompanionConfig) => void) | undefined
   return {
     get: () => value,
-    watch: () => () => {},
+    watch: (nextListener) => {
+      listener = nextListener
+      return () => {
+        listener = undefined
+      }
+    },
+    update: async (patch) => {
+      const entryId = ctx.fiber?.entry?.options.id
+      const entry = ctx.configEditor?.entries().find((entry) => entry.options.id === entryId)
+      if (!entry || !ctx.configEditor) throw new Error('companion settings require a DSH plugin entry')
+      // Persist first, then notify the running companion if this scope survived
+      // Loader reconciliation. Disposal clears the listener of an old scope.
+      await ctx.configEditor.edit(entry, (raw) => ({ ...raw, ...patch }))
+      Object.assign(value, patch)
+      listener?.(value)
+    },
   }
 }
 
@@ -213,7 +237,7 @@ function mount(ctx: MinimalContext, config: CompanionConfig = {}, eventCtx: Mini
     ctx.settings?.register?.('maid-whale-webui', Config, {
       base,
       applies: 'live',
-    }) ?? localSettingsScope(base)
+    }) ?? localSettingsScope(base, eventCtx)
 
   let bridge: HelperProcess | undefined
   let reducer: CompanionReducer | undefined
@@ -387,7 +411,9 @@ function mount(ctx: MinimalContext, config: CompanionConfig = {}, eventCtx: Mini
 export function apply(ctx: unknown, config: CompanionConfig = {}): void {
   const context = ctx as MinimalContext
   if (typeof context.inject === 'function') {
-    context.inject(['settings'], (settingsCtx: unknown) => mount(settingsCtx as MinimalContext, config, context))
+    context.inject(['settings', 'configEditor'], (settingsCtx: unknown) =>
+      mount(settingsCtx as MinimalContext, config, context),
+    )
     return
   }
   mount(context, config)

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Readable } from 'node:stream'
 
 const { bridges, MockBridge } = vi.hoisted(() => {
   const instances: Array<{
@@ -21,7 +22,7 @@ const { bridges, MockBridge } = vi.hoisted(() => {
 
 vi.mock('../src/host/helper-process.js', () => ({ HelperProcess: MockBridge }))
 
-import { CompanionReducer, apply } from '../src/index.ts'
+import { CompanionReducer, apply, inject, type createConfigHandler } from '../src/index.ts'
 
 describe('companion host lifecycle', () => {
   beforeEach(() => {
@@ -94,5 +95,44 @@ describe('companion host lifecycle', () => {
     expect(offEvent).toHaveBeenCalledTimes(1)
     expect(offDisposed).toHaveBeenCalledTimes(1)
     expect(unwatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('persists the quick toggle and stops the running pet when settings.register is absent', async () => {
+    const entry = { options: { id: 'ui-skin-maid-whale-webui' } }
+    let saved: Record<string, unknown> = { enabled: true, scale: 0.8 }
+    let handler: ReturnType<typeof createConfigHandler> | undefined
+    const edit = vi.fn(async (_entry: unknown, change: (raw: Record<string, unknown>) => Record<string, unknown>) => {
+      saved = change(saved)
+    })
+    const context = {
+      fiber: { entry },
+      get configEditor() {
+        if (!inject.includes('configEditor')) throw new Error('cannot get property "configEditor" without inject')
+        return { entries: () => [entry], edit }
+      },
+      settings: {},
+      logger: { info: vi.fn() },
+      on: () => () => {},
+      inject: (_services: string[], callback: (ctx: unknown) => void) => callback(context),
+      webServer: {
+        register: (route: { handler: ReturnType<typeof createConfigHandler> }) => {
+          handler = route.handler
+        },
+      },
+      effect: (setup: () => unknown) => setup(),
+    }
+    apply(context)
+    const req = Object.assign(Readable.from([Buffer.from('{"enabled":false}')]), {
+      method: 'PATCH',
+      headers: { host: '127.0.0.1:2026' },
+      socket: { remoteAddress: '127.0.0.1' },
+    })
+    const end = vi.fn()
+    await handler!(req, { writeHead: vi.fn(), end })
+
+    expect(edit).toHaveBeenCalledWith(entry, expect.any(Function))
+    expect(saved).toEqual({ enabled: false, scale: 0.8 })
+    expect(JSON.parse(end.mock.calls[0][0]).enabled).toBe(false)
+    expect(bridges[0].stop).toHaveBeenCalledWith('settings-change')
   })
 })
